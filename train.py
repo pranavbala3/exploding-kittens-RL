@@ -46,7 +46,7 @@ class TrainingArgs:
     save_interval: int = 50
 
 
-def collect_rollout(env, policy, rollout_storage, num_steps, learning_player_id=0):
+def collect_rollout(env, policy, rollout_storage, num_steps, learning_player_id=0, device='cpu'):
     """
     Collect experience by playing games.
     
@@ -56,6 +56,7 @@ def collect_rollout(env, policy, rollout_storage, num_steps, learning_player_id=
         rollout_storage: Storage for experiences
         num_steps: Number of steps to collect
         learning_player_id: Which player is learning (default: 0)
+        device: Device to run policy on ('cpu' or 'cuda')
     
     Returns:
         (games_played, wins) tuple
@@ -71,15 +72,17 @@ def collect_rollout(env, policy, rollout_storage, num_steps, learning_player_id=
         if env.state.current_player == learning_player_id:
             # Process observation
             obs_tensor = process_observation(obs)
+            # Move to device
+            obs_tensor = {k: v.to(device) for k, v in obs_tensor.items()}
             
             # Get action masks
             masks_dict = env.get_action_mask(learning_player_id)
             masks_tensor = {
-                'head1': torch.BoolTensor(masks_dict['head1']).unsqueeze(0),
-                'head2': torch.BoolTensor(masks_dict['head2']).unsqueeze(0),
-                'head3': torch.BoolTensor(masks_dict['head3']).unsqueeze(0),
-                'head4': torch.BoolTensor(masks_dict['head4']).unsqueeze(0),
-                'head5': torch.BoolTensor(masks_dict['head5']).unsqueeze(0),
+                'head1': torch.BoolTensor(masks_dict['head1']).unsqueeze(0).to(device),
+                'head2': torch.BoolTensor(masks_dict['head2']).unsqueeze(0).to(device),
+                'head3': torch.BoolTensor(masks_dict['head3']).unsqueeze(0).to(device),
+                'head4': torch.BoolTensor(masks_dict['head4']).unsqueeze(0).to(device),
+                'head5': torch.BoolTensor(masks_dict['head5']).unsqueeze(0).to(device),
             }
             
             # Get action from policy
@@ -129,8 +132,8 @@ def collect_rollout(env, policy, rollout_storage, num_steps, learning_player_id=
             rollout_storage.insert(
                 obs=obs,  # Store raw obs, not tensor
                 action=action,
-                action_log_prob=log_prob,
-                value_pred=value,
+                action_log_prob=log_prob.cpu(),
+                value_pred=value.cpu(),
                 reward=reward,
                 mask=0.0 if done else 1.0,
                 action_mask=masks_dict  # Store raw masks
@@ -175,6 +178,12 @@ def train():
     """Main training loop."""
     args = TrainingArgs()
     
+    # Setup device (GPU if available)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    
     # Setup
     config = GameConfig(num_players=args.num_players)
     env = ExplodingKittensEnv(config)
@@ -184,7 +193,7 @@ def train():
         hidden_dim=128,
         num_attention_heads=4,
         use_value_norm=args.use_value_norm
-    )
+    ).to(device)  # Move to GPU
     
     ppo = PPO(policy, args)
     
@@ -211,7 +220,7 @@ def train():
         
         # Collect rollout
         rollout_storage = RolloutStorage(num_steps=args.num_steps)
-        games_played, wins = collect_rollout(env, policy, rollout_storage, args.num_steps)
+        games_played, wins = collect_rollout(env, policy, rollout_storage, args.num_steps, device=device)
         
         total_games += games_played
         total_wins += wins

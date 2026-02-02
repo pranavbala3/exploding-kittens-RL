@@ -194,14 +194,17 @@ class ExplodingKittensPolicy(nn.Module):
                 action4 = output['logits4'].argmax(dim=-1)
                 action5 = output['logits5'].argmax(dim=-1)
             else:
-                # Sample from categorical distributions
-                from torch.distributions import Categorical
+                # Helper to handle empty masks
+                def safe_categorical(logits, mask):
+                    all_masked = torch.all(torch.isinf(logits) & (logits < 0), dim=-1, keepdim=True)
+                    safe_logits = torch.where(all_masked.expand_as(logits), torch.zeros_like(logits), logits)
+                    return Categorical(logits=safe_logits)
                 
-                dist1 = Categorical(logits=output['logits1'])
-                dist2 = Categorical(logits=output['logits2'])
-                dist3 = Categorical(logits=output['logits3'])
-                dist4 = Categorical(logits=output['logits4'])
-                dist5 = Categorical(logits=output['logits5'])
+                dist1 = safe_categorical(output['logits1'], masks['head1'])
+                dist2 = safe_categorical(output['logits2'], masks['head2'])
+                dist3 = safe_categorical(output['logits3'], masks['head3'])
+                dist4 = safe_categorical(output['logits4'], masks['head4'])
+                dist5 = safe_categorical(output['logits5'], masks['head5'])
                 
                 action1 = dist1.sample()
                 action2 = dist2.sample()

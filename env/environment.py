@@ -9,6 +9,7 @@ from handlers.basic_actions import DrawHandler, SkipHandler, AttackHandler, Shuf
 from handlers.special_actions import SeeFutureHandler, FavorHandler, DefuseHandler, NopeHandler
 from handlers.combo_actions import TwoOfAKindHandler, ThreeOfAKindHandler
 from utils.env_utils import get_next_alive_player
+from utils.rewards import compute_reward
 
 
 class ExplodingKittensEnv:
@@ -233,16 +234,20 @@ class ExplodingKittensEnv:
         if not handler.can_execute(self.state, player_id, action):
             return self.get_observation(player_id), 0, False, {'error': 'Cannot execute action'}
         
-        reward, done, info = handler.execute(self.state, player_id, action)
+        _, done, info = handler.execute(self.state, player_id, action)
         
         # CHECK WIN CONDITION IMMEDIATELY AFTER EXECUTION
         alive_count = sum(self.state.players_alive)
         if alive_count == 1:
             done = True
             winner = [i for i, alive in enumerate(self.state.players_alive) if alive][0]
-            reward = 1.0 if player_id == winner else 0
             info['winner'] = winner
-            return self.get_observation(winner), reward, done, info
+        
+        # Compute shaped reward
+        reward = compute_reward(self.state, player_id, action, done, info)
+        
+        if done:
+            return self.get_observation(winner if 'winner' in info else player_id), reward, done, info
         
         # Advance turn if needed
         if self.state.have_drawn_this_turn or action_type in [ActionType.PLAY_SKIP, ActionType.PLAY_ATTACK, ActionType.PLAY_DEFUSE]:
@@ -253,9 +258,8 @@ class ExplodingKittensEnv:
         if alive_count == 1:
             done = True
             winner = [i for i, alive in enumerate(self.state.players_alive) if alive][0]
-            if self.state.players_alive[player_id]:
-                reward = 1.0
             info['winner'] = winner
+            reward = compute_reward(self.state, player_id, action, done, info)
         
         return self.get_observation(self.state.current_player), reward, done, info
 

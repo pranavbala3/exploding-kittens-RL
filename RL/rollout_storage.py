@@ -236,16 +236,14 @@ def batch_observations(obs_list: List[Dict]) -> Dict[str, torch.Tensor]:
     Convert list of observation dictionaries to batched tensors.
     
     Args:
-        obs_list: List of observation dicts
+        obs_list: List of observation dicts from environment
     
     Returns:
         Dictionary with batched tensors
     """
-    # Assume all observations have the same structure
-    batched = {}
-    
     # Stack simple tensors
-    batched['hand'] = torch.stack([torch.FloatTensor(o['hand']) for o in obs_list])
+    batched = {}
+    batched['hand'] = torch.stack([torch.FloatTensor(o['your_hand']) for o in obs_list])
     batched['deck_info'] = torch.stack([
         torch.FloatTensor([o['deck_size'], o['exploding_kittens_in_deck']]) 
         for o in obs_list
@@ -258,15 +256,20 @@ def batch_observations(obs_list: List[Dict]) -> Dict[str, torch.Tensor]:
         ]) 
         for o in obs_list
     ])
-    batched['see_future'] = torch.stack([
-        torch.FloatTensor([
-            c if c is not None else -1 
-            for c in o['top_3_cards']
-        ] + [float(o['see_future_active'])])
-        for o in obs_list
-    ])
     
-    # Stack opponent data (more complex)
+    # See the future encoding
+    see_future_list = []
+    for o in obs_list:
+        see_future = np.zeros(40)
+        if o['see_future_active']:
+            for i, card in enumerate(o['top_3_cards']):
+                if card is not None:
+                    see_future[i * 13 + card] = 1.0
+            see_future[39] = 1.0
+        see_future_list.append(see_future)
+    batched['see_future'] = torch.FloatTensor(np.array(see_future_list))
+    
+    # Stack opponent data
     opponent_data = []
     for o in obs_list:
         opp_features = []

@@ -4,6 +4,7 @@ from torch.distributions import Categorical
 from typing import Dict, Tuple
 from networks.encoders import HandEncoder, OpponentEncoder, GameStateEncoder
 from networks.action_heads import ActionHead
+from utils.value_norm import ValueNormalizer
 
 
 class ExplodingKittensPolicy(nn.Module):
@@ -26,10 +27,16 @@ class ExplodingKittensPolicy(nn.Module):
         embed_dim: int = 128,
         hidden_dim: int = 128,
         num_attention_heads: int = 4,
+        use_value_norm: bool = True,
     ):
         super().__init__()
         
         self.embed_dim = embed_dim
+        self.use_value_norm = use_value_norm
+        
+        # Value normalization (from Catan RL)
+        if use_value_norm:
+            self.value_normalizer = ValueNormalizer(mean=0.5, std=0.3)
         
         # Encoders for different state components
         self.hand_encoder = HandEncoder(hand_dim=13, embed_dim=embed_dim)
@@ -86,7 +93,7 @@ class ExplodingKittensPolicy(nn.Module):
         
         self.defuse_position_head = ActionHead(
             input_dim=embed_dim,
-            output_dim=50,
+            output_dim=56,  # Must match max_deck_size from GameConfig
             hidden_dim=hidden_dim,
             use_attention=False,
         )
@@ -230,12 +237,21 @@ class ExplodingKittensPolicy(nn.Module):
         # Forward pass
         output = self.forward(obs, action_masks)
         
+        # Helper to handle empty masks
+        def safe_categorical(logits, mask):
+            """Create categorical, replacing all-inf with zeros."""
+            # Check if all values are -inf (all masked)
+            all_masked = torch.all(torch.isinf(logits) & (logits < 0), dim=-1, keepdim=True)
+            # Replace all-inf rows with zeros
+            safe_logits = torch.where(all_masked.expand_as(logits), torch.zeros_like(logits), logits)
+            return Categorical(logits=safe_logits)
+        
         # Create distributions for each head
-        dist1 = Categorical(logits=output['logits1'])
-        dist2 = Categorical(logits=output['logits2'])
-        dist3 = Categorical(logits=output['logits3'])
-        dist4 = Categorical(logits=output['logits4'])
-        dist5 = Categorical(logits=output['logits5'])
+        dist1 = safe_categorical(output['logits1'], action_masks['head1'])
+        dist2 = safe_categorical(output['logits2'], action_masks['head2'])
+        dist3 = safe_categorical(output['logits3'], action_masks['head3'])
+        dist4 = safe_categorical(output['logits4'], action_masks['head4'])
+        dist5 = safe_categorical(output['logits5'], action_masks['head5'])
         
         # Get log probs of the actions that were taken
         log_prob1 = dist1.log_prob(actions['head1'])

@@ -9,7 +9,7 @@ class PPO():
         self.ppo_epoch = args.ppo_epoch
         self.num_mini_batch = args.num_mini_batch
         self.value_loss_coef = args.value_loss_coef
-        self.entropy_coef = args.entropy_coef
+        self.entropy_coef = args.entropy_coef_start  # Start with high entropy
         self.max_grad_norm = args.max_grad_norm
         self.gamma = args.gamma
         self.gae_lambda = args.gae_lambda
@@ -22,19 +22,21 @@ class PPO():
     
     def update(self, rollout_storage):
         """Update policy using PPO."""
+        from RL.rollout_storage import batch_observations, batch_action_masks, batch_actions
+        
         value_loss_epoch = 0
         action_loss_epoch = 0
         entropy_loss_epoch = 0
         
+        # Compute advantages once (how good were actions?)
+        rollout_storage.compute_advantages(
+            self.actor_critic, 
+            self.gamma, 
+            self.gae_lambda
+        )
+        
         # PPO: Update multiple times on the same data
         for e in range(self.ppo_epoch):
-            # Compute advantages (how good were actions?)
-            rollout_storage.compute_advantages(
-                self.actor_critic, 
-                self.gamma, 
-                self.gae_lambda
-            )
-            
             # Get mini-batches of data
             data_generator = rollout_storage.get_batches(self.num_mini_batch)
             
@@ -43,14 +45,24 @@ class PPO():
                     value_preds_batch, returns_batch, \
                     old_action_log_probs_batch, adv_batch = batch
                 
+                # Batch observations and masks
+                obs_batched = batch_observations(obs_batch)
+                masks_batched = batch_action_masks(action_masks_batch)
+                actions_batched = batch_actions(actions_batch)
+                
+                # Apply value normalization (from Catan RL)
+                if self.actor_critic.use_value_norm:
+                    value_preds_batch = self.actor_critic.value_normalizer.normalize(value_preds_batch)
+                    returns_batch = self.actor_critic.value_normalizer.normalize(returns_batch)
+                
                 # Evaluate actions with current policy
                 values, action_log_probs, entropy, _ = \
                     self.actor_critic.evaluate_actions(
-                        obs_batch, 
+                        obs_batched, 
                         None,  # No recurrent states
                         None,  # No masks
-                        actions_batch, 
-                        action_masks_batch
+                        actions_batched, 
+                        masks_batched
                     )
                 
                 # PPO policy loss
@@ -77,7 +89,7 @@ class PPO():
                 total_loss = (
                     value_loss * self.value_loss_coef + 
                     action_loss - 
-                    entropy.mean() * self.entropy_coef
+                    entropy * self.entropy_coef
                 )
                 
                 # Update
@@ -92,7 +104,7 @@ class PPO():
                 # Track losses
                 value_loss_epoch += value_loss.item()
                 action_loss_epoch += action_loss.item()
-                entropy_loss_epoch += entropy.mean().item()
+                entropy_loss_epoch += entropy.item()
         
         # Average losses
         num_updates = self.ppo_epoch * self.num_mini_batch
@@ -100,3 +112,8 @@ class PPO():
         action_loss_epoch /= num_updates
         entropy_loss_epoch /= num_updates
         
+        return {
+            'value_loss': value_loss_epoch,
+            'action_loss': action_loss_epoch,
+            'entropy': entropy_loss_epoch,
+        }

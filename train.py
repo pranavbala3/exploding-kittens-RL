@@ -226,7 +226,7 @@ def train():
         total_wins += wins
         
         # Update policy
-        losses = ppo.update(rollout_storage)
+        losses = ppo.update(rollout_storage, device=device)
         
         # Logging
         if update % args.log_interval == 0:

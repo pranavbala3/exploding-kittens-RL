@@ -20,7 +20,7 @@ class PPO():
             eps=args.eps
         )
     
-    def update(self, rollout_storage):
+    def update(self, rollout_storage, device='cpu'):
         """Update policy using PPO."""
         from RL.rollout_storage import batch_observations, batch_action_masks, batch_actions
         
@@ -49,6 +49,15 @@ class PPO():
                 obs_batched = batch_observations(obs_batch)
                 masks_batched = batch_action_masks(action_masks_batch)
                 actions_batched = batch_actions(actions_batch)
+                
+                # Move to device
+                obs_batched = {k: v.to(device) for k, v in obs_batched.items()}
+                masks_batched = {k: v.to(device) for k, v in masks_batched.items()}
+                actions_batched = {k: v.to(device) for k, v in actions_batched.items()}
+                value_preds_batch = value_preds_batch.to(device)
+                returns_batch = returns_batch.to(device)
+                old_action_log_probs_batch = old_action_log_probs_batch.to(device)
+                adv_batch = adv_batch.to(device)
                 
                 # Apply value normalization (from Catan RL)
                 if self.actor_critic.use_value_norm:

@@ -54,14 +54,15 @@ def sample_opponent_policies(policy_pool, num_opponents=3, recency_bias=0.7):
     return opponents
 
 
-def collect_rollout_selfplay(env, policy, opponent_policies, rollout_storage, num_steps, device='cpu'):
+def collect_rollout_selfplay(env, policy, opponent_nets, opponent_policies, rollout_storage, num_steps, device='cpu'):
     """
     Collect experience with self-play opponents.
     
     Args:
         env: Game environment
         policy: Current policy (learning player)
-        opponent_policies: List of 3 opponent policy state dicts
+        opponent_nets: List of 3 persistent opponent networks
+        opponent_policies: List of 3 opponent policy state dicts to load
         rollout_storage: Storage for experiences
         num_steps: Number of steps to collect
         device: Device to run on
@@ -69,13 +70,10 @@ def collect_rollout_selfplay(env, policy, opponent_policies, rollout_storage, nu
     Returns:
         (games_played, wins) tuple
     """
-    # Create opponent policy instances
-    opponent_nets = []
-    for opp_state_dict in opponent_policies:
-        opp_net = ExplodingKittensPolicy(embed_dim=128, hidden_dim=128, use_value_norm=True).to(device)
-        opp_net.load_state_dict(opp_state_dict)
-        opp_net.eval()
-        opponent_nets.append(opp_net)
+    # Update opponent networks with sampled policies
+    for i, opp_state_dict in enumerate(opponent_policies):
+        opponent_nets[i].load_state_dict(opp_state_dict)
+        opponent_nets[i].eval()
     
     obs = env.reset()
     done = False
@@ -206,6 +204,12 @@ def train_selfplay():
     env = ExplodingKittensEnv(config)
     policy = ExplodingKittensPolicy(embed_dim=128, hidden_dim=128, use_value_norm=True).to(device)
     ppo = PPO(policy, args)
+
+    # Create persistent opponent networks
+    opponent_nets = [
+        ExplodingKittensPolicy(embed_dim=128, hidden_dim=128, use_value_norm=True).to(device)
+        for _ in range(3)
+    ]
     
     # Policy pool (store last 100 policies)
     policy_pool = deque(maxlen=100)
@@ -231,7 +235,7 @@ def train_selfplay():
         # Collect rollout with self-play
         rollout_storage = RolloutStorage(num_steps=args.num_steps)
         games_played, wins = collect_rollout_selfplay(
-            env, policy, opponent_policies, rollout_storage, args.num_steps, device
+            env, policy, opponent_nets,opponent_policies, rollout_storage, args.num_steps, device
         )
         
         total_games += games_played

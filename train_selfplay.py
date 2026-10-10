@@ -10,6 +10,7 @@ from networks.policy import ExplodingKittensPolicy
 from RL.ppo import PPO
 from RL.rollout_storage import RolloutStorage
 from utils.observation_utils import process_observation
+from RL.collect import collect_rollout, masks_to_tensors
 from train import TrainingArgs
 
 """
@@ -56,171 +57,98 @@ def sample_opponent_policies(policy_pool, num_opponents=3, recency_bias=0.7):
 
 def collect_rollout_selfplay(env, policy, opponent_nets, opponent_policies, rollout_storage, num_steps, device='cpu'):
     """
-    Collect experience with self-play opponents.
-    
+    Collect experience with self-play opponents drawn from the policy pool.
+
     Args:
-        env: Game environment
-        policy: Current policy (learning player)
-        opponent_nets: List of 3 persistent opponent networks
-        opponent_policies: List of 3 opponent policy state dicts to load
-        rollout_storage: Storage for experiences
-        num_steps: Number of steps to collect
-        device: Device to run on
-    
+        opponent_nets: persistent opponent networks (one per opponent seat, up to 4)
+        opponent_policies: state dicts to load into the opponent networks this rollout
     Returns:
         (games_played, wins) tuple
     """
-    # Update opponent networks with sampled policies
-    for i, opp_state_dict in enumerate(opponent_policies):
-        opponent_nets[i].load_state_dict(opp_state_dict)
-        opponent_nets[i].eval()
-    
-    obs = env.reset()
-    done = False
-    steps_collected = 0
-    games_played = 0
-    wins = 0
-    learning_player_id = 0
-    
-    while steps_collected < num_steps:
-        current_player = env.state.current_player
-        
-        if current_player == learning_player_id:
-            # Learning player uses current policy
-            obs_tensor = process_observation(obs)
-            obs_tensor = {k: v.to(device) for k, v in obs_tensor.items()}
-            
-            masks_dict = env.get_action_mask(learning_player_id)
-            masks_tensor = {
-                'head1': torch.BoolTensor(masks_dict['head1']).unsqueeze(0).to(device),
-                'head2': torch.BoolTensor(masks_dict['head2']).unsqueeze(0).to(device),
-                'head3': torch.BoolTensor(masks_dict['head3']).unsqueeze(0).to(device),
-                'head4': torch.BoolTensor(masks_dict['head4']).unsqueeze(0).to(device),
-                'head5': torch.BoolTensor(masks_dict['head5']).unsqueeze(0).to(device),
-            }
-            
-            with torch.no_grad():
-                output = policy.forward(obs_tensor, masks_tensor)
-                
-                def safe_categorical(logits, mask):
-                    if not mask.any():
-                        logits = torch.zeros_like(logits)
-                    return torch.distributions.Categorical(logits=logits)
-                
-                dist1 = safe_categorical(output['logits1'], masks_tensor['head1'])
-                dist2 = safe_categorical(output['logits2'], masks_tensor['head2'])
-                dist3 = safe_categorical(output['logits3'], masks_tensor['head3'])
-                dist4 = safe_categorical(output['logits4'], masks_tensor['head4'])
-                dist5 = safe_categorical(output['logits5'], masks_tensor['head5'])
-                
-                action1 = dist1.sample()
-                action2 = dist2.sample()
-                action3 = dist3.sample()
-                action4 = dist4.sample()
-                action5 = dist5.sample()
-                
-                log_prob = (dist1.log_prob(action1) + dist2.log_prob(action2) + 
-                           dist3.log_prob(action3) + dist4.log_prob(action4) + 
-                           dist5.log_prob(action5))
-                
-                value = output['value']
-            
-            action = {
-                'head1': action1.item(),
-                'head2': action2.item(),
-                'head3': action3.item(),
-                'head4': action4.item(),
-                'head5': action5.item(),
-            }
-            
-            next_obs, reward, done, info = env.step(action)
-            
-            rollout_storage.insert(
-                obs=obs,
-                action=action,
-                action_log_prob=log_prob.cpu(),
-                value_pred=value.cpu(),
-                reward=reward,
-                mask=0.0 if done else 1.0,
-                action_mask=masks_dict
-            )
-            
-            steps_collected += 1
-            obs = next_obs
-            
-            if done:
-                games_played += 1
-                if 'winner' in info and info['winner'] == learning_player_id:
-                    wins += 1
-                obs = env.reset()
-                done = False
-        else:
-            # Opponent uses old policy
-            opponent_idx = (current_player - 1) % 3  # Map player 1,2,3 to opponent 0,1,2
-            opponent_net = opponent_nets[opponent_idx]
-            
-            obs_tensor = process_observation(obs)
-            obs_tensor = {k: v.to(device) for k, v in obs_tensor.items()}
-            
-            masks_dict = env.get_action_mask(current_player)
-            masks_tensor = {
-                'head1': torch.BoolTensor(masks_dict['head1']).unsqueeze(0).to(device),
-                'head2': torch.BoolTensor(masks_dict['head2']).unsqueeze(0).to(device),
-                'head3': torch.BoolTensor(masks_dict['head3']).unsqueeze(0).to(device),
-                'head4': torch.BoolTensor(masks_dict['head4']).unsqueeze(0).to(device),
-                'head5': torch.BoolTensor(masks_dict['head5']).unsqueeze(0).to(device),
-            }
-            
-            with torch.no_grad():
-                action = opponent_net.get_action(obs_tensor, masks_tensor, deterministic=False)
-            
-            obs, reward, done, info = env.step(action)
-            
-            if done:
-                games_played += 1
-                if 'winner' in info and info['winner'] == learning_player_id:
-                    wins += 1
-                obs = env.reset()
-                done = False
-    
-    return games_played, wins
+    for net, state_dict in zip(opponent_nets, opponent_policies):
+        net.load_state_dict(state_dict)
+        net.eval()
+
+    def opponent_action(seat, opp_idx, obs, masks_dict):
+        net = opponent_nets[opp_idx % len(opponent_nets)]
+        obs_tensor = {k: v.to(device) for k, v in process_observation(obs).items()}
+        masks_tensor = masks_to_tensors(masks_dict, device)
+        with torch.no_grad():
+            action = net.get_action(obs_tensor, masks_tensor, deterministic=False)
+        return {k: int(v) for k, v in action.items()}
+
+    return collect_rollout(env, policy, rollout_storage, num_steps, opponent_action, device=device)
 
 
-def train_selfplay():
+def train_selfplay(argv=None):
     """Main self-play training loop."""
+    import argparse
+    import os
+    import random as _random
+    from evaluate import win_rate_vs_random
+
+    parser = argparse.ArgumentParser(description='Self-play PPO for Exploding Kittens')
+    parser.add_argument('--updates', type=int, default=500)
+    parser.add_argument('--steps', type=int, default=2048, help='learner decisions per update')
+    parser.add_argument('--embed-dim', type=int, default=128)
+    parser.add_argument('--snapshot-every', type=int, default=5, help='add policy to the pool every N updates')
+    parser.add_argument('--eval-every', type=int, default=25)
+    parser.add_argument('--eval-games', type=int, default=400)
+    parser.add_argument('--save-every', type=int, default=50)
+    parser.add_argument('--out', default='checkpoints')
+    parser.add_argument('--init', default=None, help='warm-start from a checkpoint')
+    parser.add_argument('--threads', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=0)
+    cli = parser.parse_args(argv)
+
+    if cli.threads:
+        torch.set_num_threads(cli.threads)
+    torch.manual_seed(cli.seed)
+    np.random.seed(cli.seed)
+    _random.seed(cli.seed)
+
     args = TrainingArgs()
-    args.num_steps = 2000
-    args.num_updates = 500  # Self-play needs more updates
-    args.log_interval = 5
-    
+    args.num_steps = cli.steps
+    args.num_updates = cli.updates
+    model_config = {'embed_dim': cli.embed_dim, 'hidden_dim': cli.embed_dim, 'num_attention_heads': 4}
+    os.makedirs(cli.out, exist_ok=True)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"🎮 Self-Play Training (Catan RL approach)")
-    print(f"Using device: {device}")
-    print(f"Updates: {args.num_updates}")
-    print(f"Policy pool size: 100 (last 100 checkpoints)")
-    print()
-    
-    config = GameConfig(num_players=args.num_players)
-    env = ExplodingKittensEnv(config)
-    policy = ExplodingKittensPolicy(embed_dim=128, hidden_dim=128, use_value_norm=True).to(device)
+    print(f"Self-play training | device={device} | updates={args.num_updates} | "
+          f"steps/update={args.num_steps} | model={model_config}", flush=True)
+
+    env = ExplodingKittensEnv(GameConfig(num_players=args.num_players))
+    policy = ExplodingKittensPolicy(use_value_norm=True, **model_config).to(device)
+    if cli.init:
+        ckpt = torch.load(cli.init, map_location=device)
+        policy.load_state_dict(ckpt['policy_state_dict'])
+        if 'value_norm' in ckpt:
+            policy.value_normalizer.load_state_dict(ckpt['value_norm'])
+        print(f"Warm-started from {cli.init}", flush=True)
     ppo = PPO(policy, args)
 
-    # Create persistent opponent networks
-    opponent_nets = [
-        ExplodingKittensPolicy(embed_dim=128, hidden_dim=128, use_value_norm=True).to(device)
-        for _ in range(3)
-    ]
-    
-    # Policy pool (store last 100 policies)
+    num_opponents = args.num_players - 1
+    opponent_nets = [ExplodingKittensPolicy(use_value_norm=True, **model_config).to(device)
+                     for _ in range(num_opponents)]
+
     policy_pool = deque(maxlen=100)
     policy_pool.append(copy.deepcopy(policy.state_dict()))
-    
+
+    def save(path, update):
+        torch.save({
+            'policy_state_dict': policy.state_dict(),
+            'optimizer_state_dict': ppo.optimizer.state_dict(),
+            'value_norm': policy.value_normalizer.state_dict(),
+            'model_config': model_config,
+            'policy_pool': list(policy_pool),
+            'update': update,
+        }, path)
+
     start_time = time.time()
-    total_wins = 0
-    total_games = 0
-    
-    for update in range(args.num_updates):
-        # Entropy annealing
+    window_wins = window_games = 0
+    best = -1.0
+
+    for update in range(1, args.num_updates + 1):
         if update < args.entropy_anneal_start:
             ppo.entropy_coef = args.entropy_coef_start
         elif update < args.entropy_anneal_end:
@@ -228,54 +156,40 @@ def train_selfplay():
             ppo.entropy_coef = args.entropy_coef_start - progress * (args.entropy_coef_start - args.entropy_coef_end)
         else:
             ppo.entropy_coef = args.entropy_coef_end
-        
-        # Sample opponent policies from pool
-        opponent_policies = sample_opponent_policies(policy_pool, num_opponents=3, recency_bias=0.7)
-        
-        # Collect rollout with self-play
+
+        opponent_policies = sample_opponent_policies(policy_pool, num_opponents=num_opponents, recency_bias=0.7)
         rollout_storage = RolloutStorage(num_steps=args.num_steps)
         games_played, wins = collect_rollout_selfplay(
-            env, policy, opponent_nets,opponent_policies, rollout_storage, args.num_steps, device
+            env, policy, opponent_nets, opponent_policies, rollout_storage, args.num_steps, device
         )
-        
-        total_games += games_played
-        total_wins += wins
-        
-        # Update policy
+        window_games += games_played
+        window_wins += wins
+
         losses = ppo.update(rollout_storage, device=device)
-        
-        # Add current policy to pool every 5 updates
-        if update % 5 == 0:
+
+        if update % cli.snapshot_every == 0:
             policy_pool.append(copy.deepcopy(policy.state_dict()))
-        
-        # Logging
+
         if update % args.log_interval == 0:
-            elapsed = time.time() - start_time
-            win_rate = total_wins / max(total_games, 1) * 100
-            
-            print(f'Update {update}/{args.num_updates} | {elapsed/60:.1f}min | Wins: {win_rate:.1f}%')
-            print(f'  Policy pool size: {len(policy_pool)} | Entropy: {ppo.entropy_coef:.4f}')
-            
-            total_wins = 0
-            total_games = 0
-        
-        # Save checkpoint
-        if update % 50 == 0 and update > 0:
-            torch.save({
-                'policy_state_dict': policy.state_dict(),
-                'policy_pool': list(policy_pool),
-                'update': update,
-            }, f'selfplay_checkpoint_{update}.pt')
-            print(f'💾 Saved checkpoint with policy pool')
-    
-    # Final save
-    torch.save({
-        'policy_state_dict': policy.state_dict(),
-        'policy_pool': list(policy_pool),
-        'update': args.num_updates,
-    }, 'selfplay_final.pt')
-    
-    print('✅ Self-play training complete!')
+            print(f"update {update:4d} | {(time.time() - start_time) / 60:5.1f} min | "
+                  f"self-play win {100 * window_wins / max(window_games, 1):5.1f}% ({window_games} games) | "
+                  f"vloss {losses['value_loss']:.3f} | ent {losses['entropy']:.2f} "
+                  f"(coef {ppo.entropy_coef:.4f}) | pool {len(policy_pool)}", flush=True)
+            window_wins = window_games = 0
+
+        if update % cli.eval_every == 0 or update == args.num_updates:
+            rate = win_rate_vs_random(policy, num_games=cli.eval_games, num_players=args.num_players, device=device)
+            print(f"  EVAL update {update}: win rate vs random = {100 * rate:.1f}% "
+                  f"(baseline {100 / args.num_players:.0f}%, {cli.eval_games} games)", flush=True)
+            if rate > best:
+                best = rate
+                save(os.path.join(cli.out, 'selfplay_best.pt'), update)
+
+        if update % cli.save_every == 0:
+            save(os.path.join(cli.out, f'selfplay_{update}.pt'), update)
+
+    save(os.path.join(cli.out, 'selfplay_final.pt'), args.num_updates)
+    print(f"Self-play training complete. Best eval win rate vs random: {100 * best:.1f}%", flush=True)
 
 
 if __name__ == '__main__':

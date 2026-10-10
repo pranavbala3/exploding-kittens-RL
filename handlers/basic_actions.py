@@ -16,30 +16,33 @@ class DrawHandler(ActionHandler):
             return 0, False, {'error': 'Deck is empty'}
         
         card = state.deck.pop(0)
+        # Everyone's peeked knowledge shifts up by one position.
+        state.top_3_visible = [known[1:] + [None] for known in state.top_3_visible]
         
         if card == CardType.EXPLODING_KITTEN:
             state.holding_exploding_kitten[player_id] = True
             
             if state.hands[player_id][CardType.DEFUSE] == 0:
-                # Player explodes!
+                # Player explodes. Their hand (and the kitten) are revealed and go to the
+                # discard pile, so every card stays accounted for publicly.
                 state.players_alive[player_id] = False
-                
-                # Update knowledge
-                for observer_id in range(state.num_players):
-                    if observer_id != player_id:
-                        state.opponent_min_counts[observer_id][CardType.DEFUSE] = 0
-                        state.opponent_max_counts[observer_id][CardType.DEFUSE] = 0
-                
-                # IMPORTANT: Don't continue their turn!
-                state.have_drawn_this_turn = True  # ← ADD THIS LINE
+                state.holding_exploding_kitten[player_id] = False
+                state.discard_pile.append(CardType.EXPLODING_KITTEN)
+                for c in range(len(state.hands[player_id])):
+                    state.discard_pile.extend([c] * int(state.hands[player_id][c]))
+                state.hands[player_id][:] = 0
+                state.known_counts[player_id][:] = 0
+                state.known_zero[player_id][:] = True
+                state.have_drawn_this_turn = True   # their turn is over
                 
                 return -1.0, False, {'exploded': True, 'player': player_id}
             else:
                 # Must play Defuse next
                 return 0, False, {'drew_kitten': True}
         else:
-            # Normal card
+            # Normal card (only the drawer sees it)
             state.hands[player_id][card] += 1
+            self._knowledge_unseen_card_gained(state, player_id)
             state.have_drawn_this_turn = True
             return 0, False, {'drew_card': card}
 
@@ -74,9 +77,12 @@ class AttackHandler(ActionHandler):
         # Update knowledge: played Attack
         self._update_knowledge_card_played(state, player_id, CardType.ATTACK, count=1)
         
-        # Next player gets +1 turn
+        # Attack ends ALL of the attacker's remaining turns (not just one) and the
+        # next player owes the 2 attacked turns plus whatever the attacker still owed.
+        owed = max(state.turns_remaining[player_id], 1)
         next_player = get_next_alive_player(state, player_id)
-        state.turns_remaining[next_player] += 1
+        state.turns_remaining[player_id] = 1          # _advance_turn will decrement to 0
+        state.turns_remaining[next_player] = owed + 1
         
         state.have_drawn_this_turn = True
         return 0, False, {'attacked_player': next_player}
@@ -98,6 +104,5 @@ class ShuffleHandler(ActionHandler):
         random.shuffle(state.deck)
         
         # Invalidate See the Future
-        state.see_future_active = False
-        state.top_3_visible = [None, None, None]
+        state.top_3_visible = [[None, None, None] for _ in range(state.num_players)]
         return 0, False, {}

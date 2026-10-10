@@ -5,6 +5,8 @@ from typing import Dict, Tuple
 from networks.encoders import HandEncoder, OpponentEncoder, GameStateEncoder
 from networks.action_heads import ActionHead
 from utils.value_norm import ValueNormalizer
+from core.card_types import NUM_ACTION_TYPES
+from utils.observation_utils import GAME_STATE_DIM, OPPONENT_FEATURE_DIM, SEE_FUTURE_DIM
 
 
 class ExplodingKittensPolicy(nn.Module):
@@ -36,20 +38,20 @@ class ExplodingKittensPolicy(nn.Module):
         
         # Value normalization (from Catan RL)
         if use_value_norm:
-            self.value_normalizer = ValueNormalizer(mean=0.5, std=0.3)
+            self.value_normalizer = ValueNormalizer()
         
         # Encoders for different state components
         self.hand_encoder = HandEncoder(hand_dim=13, embed_dim=embed_dim)
         self.opponent_encoder = OpponentEncoder(
-            opponent_feature_dim=29,
+            opponent_feature_dim=OPPONENT_FEATURE_DIM,
             embed_dim=embed_dim,
             num_heads=num_attention_heads,
         )
         self.game_state_encoder = GameStateEncoder(
             deck_dim=2,
             discard_dim=13,
-            game_state_dim=2,
-            see_future_dim=40,
+            game_state_dim=GAME_STATE_DIM,
+            see_future_dim=SEE_FUTURE_DIM,
             embed_dim=embed_dim,
         )
         
@@ -63,7 +65,7 @@ class ExplodingKittensPolicy(nn.Module):
         # Action heads (5 heads for the 5 action dimensions)
         self.action_type_head = ActionHead(
             input_dim=embed_dim,
-            output_dim=10,
+            output_dim=NUM_ACTION_TYPES,
             hidden_dim=hidden_dim,
             use_attention=False,
         )
@@ -212,12 +214,17 @@ class ExplodingKittensPolicy(nn.Module):
                 action4 = dist4.sample()
                 action5 = dist5.sample()
             
+            def to_py(a):
+                # A single observation yields shape-[1] tensors; env.step needs plain ints
+                # (a tensor key silently misses the handler dict -> "Invalid action type").
+                return int(a.item()) if a.numel() == 1 else a
+
             return {
-                'head1': action1.item() if action1.dim() == 0 else action1,
-                'head2': action2.item() if action2.dim() == 0 else action2,
-                'head3': action3.item() if action3.dim() == 0 else action3,
-                'head4': action4.item() if action4.dim() == 0 else action4,
-                'head5': action5.item() if action5.dim() == 0 else action5,
+                'head1': to_py(action1),
+                'head2': to_py(action2),
+                'head3': to_py(action3),
+                'head4': to_py(action4),
+                'head5': to_py(action5),
             }
     
     def evaluate_actions(self, obs, recurrent_hidden_states, masks, actions, action_masks):

@@ -69,7 +69,8 @@ class RolloutStorage:
         self.observations.append(obs)
         self.actions.append(action)
         self.action_log_probs.append(action_log_prob.cpu())
-        self.value_preds.append(value_pred.cpu())
+        # one scalar (RAW-scale) value per step
+        self.value_preds.append(value_pred.detach().reshape(-1)[0].cpu())
         self.rewards.append(reward)
         self.masks.append(mask)
         self.action_masks.append(action_mask)
@@ -96,7 +97,7 @@ class RolloutStorage:
         
         # Convert to tensors
         rewards = torch.tensor(self.rewards, dtype=torch.float32)
-        values = torch.stack(self.value_preds).squeeze()
+        values = torch.stack(self.value_preds)  # [N]
         masks = torch.tensor(self.masks, dtype=torch.float32)
         
         # Initialize
@@ -113,25 +114,21 @@ class RolloutStorage:
         else:
             next_value = 0
         
-        # Compute advantages using GAE (backwards through time)
-        gae = 0
+        # Compute advantages using GAE (backwards through time).
+        # masks[t] is 0.0 when the episode ended AFTER step t, so it gates the bootstrap
+        # from step t+1 (the previous code used masks[t+1], an off-by-one that leaked
+        # terminal rewards into the next game and bootstrapped across game boundaries).
+        gae = 0.0
         for t in reversed(range(num_steps)):
-            if t == num_steps - 1:
-                next_value_t = next_value
-                next_mask = 1.0 if masks[-1] == 1 else 0.0
-            else:
-                next_value_t = values[t + 1]
-                next_mask = masks[t + 1]
-            
-            # TD error: reward + discounted next value - current value
-            delta = rewards[t] + gamma * next_value_t * next_mask - values[t]
-            
-            # GAE: exponentially weighted average of TD errors
-            gae = delta + gamma * gae_lambda * next_mask * gae
-            
+            next_value_t = values[t + 1] if t + 1 < num_steps else next_value
+            nonterminal = masks[t]
+
+            delta = rewards[t] + gamma * next_value_t * nonterminal - values[t]
+            gae = delta + gamma * gae_lambda * nonterminal * gae
+
             advantages[t] = gae
             returns[t] = advantages[t] + values[t]
-        
+
         self.advantages = advantages
         self.returns = returns
         
@@ -232,61 +229,9 @@ def compute_returns_simple(rewards: List[float], gamma: float = 0.99) -> torch.T
 
 
 def batch_observations(obs_list: List[Dict]) -> Dict[str, torch.Tensor]:
-    """
-    Convert list of observation dictionaries to batched tensors.
-    
-    Args:
-        obs_list: List of observation dicts from environment
-    
-    Returns:
-        Dictionary with batched tensors
-    """
-    # Stack simple tensors
-    batched = {}
-    batched['hand'] = torch.stack([torch.FloatTensor(o['your_hand']) for o in obs_list])
-    batched['deck_info'] = torch.stack([
-        torch.FloatTensor([o['deck_size'], o['exploding_kittens_in_deck']]) 
-        for o in obs_list
-    ])
-    batched['discard'] = torch.stack([torch.FloatTensor(o['discard_counts']) for o in obs_list])
-    batched['game_state'] = torch.stack([
-        torch.FloatTensor([
-            float(o['have_drawn_this_turn']), 
-            float(o['holding_exploding_kitten'])
-        ]) 
-        for o in obs_list
-    ])
-    
-    # See the future encoding
-    see_future_list = []
-    for o in obs_list:
-        see_future = np.zeros(40)
-        if o['see_future_active']:
-            for i, card in enumerate(o['top_3_cards']):
-                if card is not None:
-                    see_future[i * 13 + card] = 1.0
-            see_future[39] = 1.0
-        see_future_list.append(see_future)
-    batched['see_future'] = torch.FloatTensor(np.array(see_future_list))
-    
-    # Stack opponent data
-    opponent_data = []
-    for o in obs_list:
-        opp_features = []
-        for opp in o['opponents']:
-            features = np.concatenate([
-                [opp['num_cards']],
-                [float(opp['is_alive'])],
-                [opp['turns_remaining']],
-                opp['min_counts'],
-                opp['max_counts'],
-            ])
-            opp_features.append(features)
-        opponent_data.append(np.array(opp_features))
-    
-    batched['opponents'] = torch.FloatTensor(np.array(opponent_data))
-    
-    return batched
+    """Convert list of observation dictionaries to batched tensors."""
+    from utils.observation_utils import batch_observation_features
+    return batch_observation_features(obs_list)
 
 
 def batch_action_masks(mask_list: List[Dict]) -> Dict[str, torch.Tensor]:
@@ -370,7 +315,7 @@ if __name__ == "__main__":
         reward = 0.0 if step < 99 else 1.0  # Win at the end
         mask = 1.0 if step < 99 else 0.0
         action_mask = {
-            'head1': np.ones(10, dtype=bool),
+            'head1': np.ones(11, dtype=bool),
             'head2': np.ones(4, dtype=bool),
             'head3': np.ones(13, dtype=bool),
             'head4': np.ones(13, dtype=bool),

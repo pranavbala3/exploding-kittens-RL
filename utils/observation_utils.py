@@ -1,111 +1,68 @@
-import torch
+"""Observation -> tensor featurization (single source of truth for train/eval/PPO)."""
+
+from typing import Dict, List
+
 import numpy as np
-from typing import Dict
+import torch
+
+from core.card_types import NUM_ACTION_TYPES, NUM_CARD_TYPES
+
+# [have_drawn, holding_kitten, nope_window, pending_noped, pending_is_mine,
+#  pending_targets_me] + one-hot(pending action)
+GAME_STATE_DIM = 6 + NUM_ACTION_TYPES
+SEE_FUTURE_DIM = 3 * NUM_CARD_TYPES + 1
+OPPONENT_FEATURE_DIM = 3 + 2 * NUM_CARD_TYPES
 
 
-def process_observation(obs: Dict) -> Dict[str, torch.Tensor]:
-    """
-    Convert environment observation to tensor format for network input.
-    
-    Args:
-        obs: Raw observation from environment
-    Returns:
-        Dictionary of tensors ready for network input
-    """
-    # Extract and convert to tensors
-    hand = torch.FloatTensor(obs['your_hand']).unsqueeze(0)  # [1, 13]
-    
-    # Process opponents (stack their features)
-    opponent_features = []
-    for opp in obs['opponents']:
-        features = np.concatenate([
-            [opp['num_cards']],
-            [float(opp['is_alive'])],
-            [opp['turns_remaining']],
-            opp['min_counts'],
-            opp['max_counts'],
-        ])
-        opponent_features.append(features)
-    opponents = torch.FloatTensor(np.stack(opponent_features)).unsqueeze(0)  # [1, 4, 29]
-    
-    # Deck info
-    deck_info = torch.FloatTensor([
-        obs['deck_size'],
-        obs['exploding_kittens_in_deck'],
-    ]).unsqueeze(0)  # [1, 2]
-    
-    # Discard pile
-    discard = torch.FloatTensor(obs['discard_counts']).unsqueeze(0)  # [1, 13]
-    
-    # Game state
-    game_state = torch.FloatTensor([
-        float(obs['have_drawn_this_turn']),
-        float(obs['holding_exploding_kitten']),
-    ]).unsqueeze(0)  # [1, 2]
-    
-    # See the future (one-hot encode top 3 cards)
-    see_future = np.zeros(40)  # 3 cards × 13 types + 1 for active flag
+def observation_features(obs: Dict) -> Dict[str, np.ndarray]:
+    """Unbatched float32 feature arrays for one observation."""
+    game_state = np.zeros(GAME_STATE_DIM, dtype=np.float32)
+    game_state[0] = float(obs['have_drawn_this_turn'])
+    game_state[1] = float(obs['holding_exploding_kitten'])
+    game_state[2] = float(obs.get('nope_window', False))
+    game_state[3] = float(obs.get('pending_noped', False))
+    game_state[4] = float(obs.get('pending_is_mine', False))
+    game_state[5] = float(obs.get('pending_targets_me', False))
+    pending = obs.get('pending_action', -1)
+    if pending is not None and pending >= 0:
+        game_state[6 + pending] = 1.0
+
+    see_future = np.zeros(SEE_FUTURE_DIM, dtype=np.float32)
     if obs['see_future_active']:
         for i, card in enumerate(obs['top_3_cards']):
             if card is not None:
-                see_future[i * 13 + card] = 1.0
-        see_future[39] = 1.0  # Active flag
-    see_future = torch.FloatTensor(see_future).unsqueeze(0)  # [1, 40]
-    
+                see_future[i * NUM_CARD_TYPES + card] = 1.0
+        see_future[-1] = 1.0
+
+    opponents = np.stack([
+        np.concatenate([
+            [opp['num_cards'], float(opp['is_alive']), opp['turns_remaining']],
+            opp['min_counts'],
+            opp['max_counts'],
+        ]).astype(np.float32)
+        for opp in obs['opponents']
+    ])
+
     return {
-        'hand': hand,
+        'hand': np.asarray(obs['your_hand'], dtype=np.float32),
         'opponents': opponents,
-        'deck_info': deck_info,
-        'discard': discard,
+        'deck_info': np.array([obs['deck_size'], obs['exploding_kittens_in_deck']], dtype=np.float32),
+        'discard': np.asarray(obs['discard_counts'], dtype=np.float32),
         'game_state': game_state,
         'see_future': see_future,
     }
 
 
+def batch_observation_features(obs_list: List[Dict]) -> Dict[str, torch.Tensor]:
+    feats = [observation_features(o) for o in obs_list]
+    return {k: torch.from_numpy(np.stack([f[k] for f in feats])) for k in feats[0]}
+
+
+def process_observation(obs: Dict) -> Dict[str, torch.Tensor]:
+    """Convert one environment observation to a batch-of-1 tensor dict."""
+    return batch_observation_features([obs])
+
+
 def process_masks(masks: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
     """Convert action masks to tensors."""
-    return {
-        'head1': torch.BoolTensor(masks['head1']).unsqueeze(0),
-        'head2': torch.BoolTensor(masks['head2']).unsqueeze(0),
-        'head3': torch.BoolTensor(masks['head3']).unsqueeze(0),
-        'head4': torch.BoolTensor(masks['head4']).unsqueeze(0),
-        'head5': torch.BoolTensor(masks['head5']).unsqueeze(0),
-    }
-
-
-# ==================== FILE: main.py ====================
-"""Example usage of the policy network."""
-
-import torch
-from networks.policy import ExplodingKittensPolicy
-from utils.observation_utils import process_observation, process_masks
-# from exploding_kittens.environment import ExplodingKittensEnv
-
-
-def example_usage():
-    """Demonstrate how to use the policy network."""
-    
-    # Create policy
-    policy = ExplodingKittensPolicy(
-        embed_dim=128,
-        hidden_dim=128,
-        num_attention_heads=4,
-    )
-    
-    # Example: Get action from observation
-    # env = ExplodingKittensEnv()
-    # raw_obs = env.reset()
-    # raw_masks = env.get_action_mask(0)
-    
-    # obs = process_observation(raw_obs)
-    # masks = process_masks(raw_masks)
-    
-    # action = policy.get_action(obs, masks, deterministic=False)
-    # print(f"Sampled action: {action}")
-    
-    print("Policy network created successfully!")
-    print(f"Total parameters: {sum(p.numel() for p in policy.parameters()):,}")
-
-
-if __name__ == "__main__":
-    example_usage()
+    return {k: torch.as_tensor(v, dtype=torch.bool).unsqueeze(0) for k, v in masks.items()}

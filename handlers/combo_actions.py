@@ -6,17 +6,31 @@ from core.game_state import GameState
 from utils.env_utils import get_opponent_id
 
 
+def resolve_combo_card(hand, requested_card: int, size: int):
+    """Return a card type with >= `size` copies, preferring the one the policy asked for.
+
+    The head-3 mask is shared by the 2- and 3-of-a-kind actions (it only knows >=2),
+    so a 3-of-a-kind can arrive with a card the player only holds two of. Repair it to
+    the first card type that does have `size` copies instead of rejecting a masked action.
+    """
+    if hand[requested_card] >= size:
+        return requested_card
+    for card in range(len(hand)):
+        if hand[card] >= size:
+            return card
+    return None
+
+
 class TwoOfAKindHandler(ActionHandler):
     """Handler for 2-of-a-kind combo."""
     
     def can_execute(self, state: GameState, player_id: int, action: Dict) -> bool:
-        card_type = action.get('head3', 0)
-        has_cards = state.hands[player_id][card_type] >= 2
+        has_cards = resolve_combo_card(state.hands[player_id], action.get('head3', 0), 2) is not None
         has_opponents = any(state.players_alive[i] for i in range(state.num_players) if i != player_id)
         return has_cards and has_opponents
     
     def execute(self, state: GameState, player_id: int, action: Dict) -> Tuple[float, bool, Dict]:
-        card_type = action['head3']
+        card_type = resolve_combo_card(state.hands[player_id], action['head3'], 2)
         target_id = get_opponent_id(state, player_id, action['head2'])
         
         # Remove 2 cards
@@ -46,13 +60,12 @@ class ThreeOfAKindHandler(ActionHandler):
     """Handler for 3-of-a-kind combo."""
     
     def can_execute(self, state: GameState, player_id: int, action: Dict) -> bool:
-        card_type = action.get('head3', 0)
-        has_cards = state.hands[player_id][card_type] >= 3
+        has_cards = resolve_combo_card(state.hands[player_id], action.get('head3', 0), 3) is not None
         has_opponents = any(state.players_alive[i] for i in range(state.num_players) if i != player_id)
         return has_cards and has_opponents
     
     def execute(self, state: GameState, player_id: int, action: Dict) -> Tuple[float, bool, Dict]:
-        card_type = action['head3']
+        card_type = resolve_combo_card(state.hands[player_id], action['head3'], 3)
         requested_card = action['head4']
         target_id = get_opponent_id(state, player_id, action['head2'])
         

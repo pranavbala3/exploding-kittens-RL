@@ -25,6 +25,7 @@ class PPO():
         from RL.rollout_storage import batch_observations, batch_action_masks, batch_actions
         
         value_loss_epoch = 0
+        num_updates_done = 0
         action_loss_epoch = 0
         entropy_loss_epoch = 0
         
@@ -35,6 +36,10 @@ class PPO():
             self.gae_lambda
         )
         
+        # Value targets live in normalized space; refresh the running statistics first.
+        if self.actor_critic.use_value_norm:
+            self.actor_critic.value_normalizer.update(rollout_storage.returns)
+
         # PPO: Update multiple times on the same data
         for e in range(self.ppo_epoch):
             # Get mini-batches of data
@@ -73,6 +78,10 @@ class PPO():
                         actions_batched, 
                         masks_batched
                     )
+                values = values.reshape(-1)           # [B,1] -> [B]; otherwise (values - returns) broadcasts to [B,B]
+                value_preds_batch = value_preds_batch.reshape(-1)
+                returns_batch = returns_batch.reshape(-1)
+                old_action_log_probs_batch = old_action_log_probs_batch.reshape(-1)
                 
                 # PPO policy loss
                 ratio = torch.exp(action_log_probs - old_action_log_probs_batch)
@@ -111,12 +120,13 @@ class PPO():
                 self.optimizer.step()
                 
                 # Track losses
+                num_updates_done += 1
                 value_loss_epoch += value_loss.item()
                 action_loss_epoch += action_loss.item()
                 entropy_loss_epoch += entropy.item()
         
         # Average losses
-        num_updates = self.ppo_epoch * self.num_mini_batch
+        num_updates = max(num_updates_done, 1)
         value_loss_epoch /= num_updates
         action_loss_epoch /= num_updates
         entropy_loss_epoch /= num_updates

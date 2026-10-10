@@ -108,7 +108,7 @@ def test_training_components():
         ppo_epoch = 1
         num_mini_batch = 2
         value_loss_coef = 0.5
-        entropy_coef = 0.01
+        entropy_coef_start = 0.01
         max_grad_norm = 0.5
         gamma = 0.99
         gae_lambda = 0.95

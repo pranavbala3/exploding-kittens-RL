@@ -21,9 +21,8 @@ class SeeFutureHandler(ActionHandler):
         self._update_knowledge_card_played(state, player_id, CardType.SEE_FUTURE, count=1)
         
         # View top 3 cards
-        state.top_3_visible = (state.deck[:3] + [None, None, None])[:3]
-        state.see_future_active = True
-        return 0, False, {'top_3': state.top_3_visible}
+        state.top_3_visible[player_id] = (state.deck[:3] + [None, None, None])[:3]
+        return 0, False, {'top_3': list(state.top_3_visible[player_id])}
 
 
 class FavorHandler(ActionHandler):
@@ -76,6 +75,13 @@ class DefuseHandler(ActionHandler):
         # Insert Exploding Kitten at specified position
         position = min(action['head5'], len(state.deck))
         state.deck.insert(position, CardType.EXPLODING_KITTEN)
+        # Peeked cards at/after the insertion point move down one slot. Only the defuser
+        # knows where the kitten went.
+        for p, known in enumerate(state.top_3_visible):
+            shifted = (known[:position] + [None] + known[position:])[:3]
+            if p == player_id and position < 3:
+                shifted[position] = CardType.EXPLODING_KITTEN
+            state.top_3_visible[p] = shifted
         
         state.holding_exploding_kitten[player_id] = False
         state.have_drawn_this_turn = True
@@ -83,14 +89,16 @@ class DefuseHandler(ActionHandler):
 
 
 class NopeHandler(ActionHandler):
-    """Handler for Nope card (simplified for now)."""
+    """Plays a Nope card during a Nope window.
+
+    The window itself (who may respond, chaining, resolving the pending action) is run by
+    ExplodingKittensEnv; this handler only pays for the card.
+    """
     
     def can_execute(self, state: GameState, player_id: int, action: Dict) -> bool:
-        # TODO: Implement reactive nope logic
-        return state.hands[player_id][CardType.NOPE] > 0
+        return state.pending is not None and state.hands[player_id][CardType.NOPE] > 0
     
     def execute(self, state: GameState, player_id: int, action: Dict) -> Tuple[float, bool, Dict]:
-        # TODO: Implement nope chain logic
         state.hands[player_id][CardType.NOPE] -= 1
         state.discard_pile.append(CardType.NOPE)
         
